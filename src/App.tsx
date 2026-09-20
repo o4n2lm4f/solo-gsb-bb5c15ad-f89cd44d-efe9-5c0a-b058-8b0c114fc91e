@@ -19,12 +19,19 @@ import {
 import { SAMPLE_A, SAMPLE_B } from './lib/samples';
 import { parseSrt, serializeSrt, type Cue } from './lib/srt';
 import { applyScrollChains, findScrollChains, type ScrollOptions } from './lib/scroll';
+import {
+  analyzeRhythm,
+  applyRhythmFixes,
+  liveRhythmKeys,
+  type RhythmOptions,
+} from './lib/rhythm';
 import { smartWrap, type WrapOptions } from './lib/wrap';
 import { CalibratePanel } from './components/CalibratePanel';
 import { DedupePanel } from './components/DedupePanel';
 import { ExportPanel } from './components/ExportPanel';
 import { GroupCard } from './components/GroupCard';
 import { ImportPanel } from './components/ImportPanel';
+import { RhythmPanel } from './components/RhythmPanel';
 import { StatsBar } from './components/StatsBar';
 import { Toolbar, type Filter } from './components/Toolbar';
 import { WrapPanel } from './components/WrapPanel';
@@ -84,13 +91,21 @@ export default function App() {
   const cuesBEff: Cue[] = groups ? (cuesBUsed ?? cuesB) : cuesB;
 
   // 智能断行：视图切换、参数与逐条应用状态（key 为 groupIndex）
-  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap'>('groups');
+  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'rhythm'>('groups');
   const [wrapOpts, setWrapOpts] = useState<WrapOptions>({
     maxWidth: 42,
     maxLines: 2,
     lockManualBreaks: true,
   });
   const [wrapApplied, setWrapApplied] = useState<ReadonlySet<number>>(new Set());
+
+  // 阅读节奏：参数（最大字符/秒、最短/最长时长）与逐区段采纳状态
+  const [rhythmOpts, setRhythmOpts] = useState<RhythmOptions>({
+    maxCps: 9,
+    minMs: 700,
+    maxMs: 7000,
+  });
+  const [rhythmAccepted, setRhythmAccepted] = useState<ReadonlySet<string>>(new Set());
 
   // 滚动字幕消重：参数（间隔毫秒 / 最小重叠字）与逐链采纳状态（key 为链 key）
   const [scrollOpts, setScrollOpts] = useState<ScrollOptions>({
@@ -114,6 +129,7 @@ export default function App() {
       setView('groups');
       setWrapApplied(new Set());
       setScrollAccepted(new Set());
+      setRhythmAccepted(new Set());
       setPhase('workspace');
     }, 30);
   };
@@ -213,6 +229,7 @@ export default function App() {
     setView('groups');
     setWrapApplied(new Set());
     setScrollAccepted(new Set());
+    setRhythmAccepted(new Set());
     setPhase('import');
   };
 
@@ -225,6 +242,7 @@ export default function App() {
     setView('groups');
     setWrapApplied(new Set());
     setScrollAccepted(new Set());
+    setRhythmAccepted(new Set());
     setPhase('calibrate');
   };
 
@@ -373,9 +391,49 @@ export default function App() {
   };
   const restoreAllWrap = () => setWrapApplied(new Set());
 
+  // 阅读节奏：在已采纳消重、已应用断行的结果上统计时长与字符/秒，
+  // 连续超限项组成区段并给出仅调整边界的修复；采纳状态随上游结果即时失效
+  const rhythmReport = useMemo(
+    () => analyzeRhythm(wrappedCues, rhythmOpts),
+    [wrappedCues, rhythmOpts],
+  );
+  const rhythmLive = useMemo(
+    () => liveRhythmKeys(rhythmReport, rhythmAccepted),
+    [rhythmReport, rhythmAccepted],
+  );
+  const rhythmStats = useMemo(() => {
+    let applied = 0;
+    let impossible = 0;
+    for (const seg of rhythmReport.segments) {
+      if (!seg.fixes) impossible++;
+      else if (rhythmLive.has(seg.key)) applied++;
+    }
+    return { segments: rhythmReport.segments.length, applied, impossible, over: rhythmReport.overCount };
+  }, [rhythmReport, rhythmLive]);
+  const rhythmCues = useMemo(
+    () => applyRhythmFixes(wrappedCues, rhythmReport, rhythmLive),
+    [wrappedCues, rhythmReport, rhythmLive],
+  );
+
+  const acceptRhythm = (key: string) =>
+    setRhythmAccepted((prev) => new Set(prev).add(key));
+  const restoreRhythm = (key: string) =>
+    setRhythmAccepted((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  const acceptAllRhythm = (keys: string[]) =>
+    setRhythmAccepted((prev) => {
+      const next = new Set(prev);
+      keys.forEach((k) => next.add(k));
+      return next;
+    });
+  const restoreAllRhythm = () => setRhythmAccepted(new Set());
+
   const finalCues = useMemo(
-    () => (autoFix ? autoFixTimes(wrappedCues) : wrappedCues),
-    [wrappedCues, autoFix],
+    () => (autoFix ? autoFixTimes(rhythmCues) : rhythmCues),
+    [rhythmCues, autoFix],
   );
   const issues = useMemo(
     () =>
@@ -541,6 +599,13 @@ export default function App() {
                     智能断行
                     <span className="tab-count">{wrapStats.appliedCount}</span>
                   </button>
+                  <button
+                    className={`tab ${view === 'rhythm' ? 'active' : ''}`}
+                    onClick={() => setView('rhythm')}
+                  >
+                    阅读节奏
+                    <span className="tab-count">{rhythmStats.applied}</span>
+                  </button>
                 </div>
                 {view === 'groups' ? (
                   <>
@@ -590,7 +655,7 @@ export default function App() {
                     onAcceptAll={acceptAllChains}
                     onRestoreAll={restoreAllChains}
                   />
-                ) : (
+                ) : view === 'wrap' ? (
                   <WrapPanel
                     cues={dedupedCues}
                     results={wrapResults}
@@ -601,6 +666,18 @@ export default function App() {
                     onRestore={restoreWrap}
                     onApplyAll={applyAllWrap}
                     onRestoreAll={restoreAllWrap}
+                  />
+                ) : (
+                  <RhythmPanel
+                    cues={wrappedCues}
+                    report={rhythmReport}
+                    accepted={rhythmAccepted}
+                    options={rhythmOpts}
+                    onOptions={setRhythmOpts}
+                    onAccept={acceptRhythm}
+                    onRestore={restoreRhythm}
+                    onAcceptAll={acceptAllRhythm}
+                    onRestoreAll={restoreAllRhythm}
                   />
                 )}
               </main>
@@ -618,6 +695,9 @@ export default function App() {
                 dedupSaved={dedupStats.saved}
                 wrapApplied={wrapStats.appliedCount}
                 wrapFailed={wrapStats.failed}
+                rhythmSegments={rhythmStats.segments}
+                rhythmApplied={rhythmStats.applied}
+                rhythmImpossible={rhythmStats.impossible}
                 preview={preview}
                 canExport={canExport}
                 onExport={() => download('merged.srt', '\uFEFF' + serializeSrt(finalCues))}

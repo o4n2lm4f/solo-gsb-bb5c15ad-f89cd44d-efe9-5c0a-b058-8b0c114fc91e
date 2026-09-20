@@ -18,6 +18,12 @@ interface ExportPanelProps {
   wrapApplied: number;
   /** 无法满足断行限制、保持原文的条数 */
   wrapFailed: number;
+  /** 阅读节奏识别出的连续超限区段数 */
+  rhythmSegments: number;
+  /** 已采纳修复的区段数 */
+  rhythmApplied: number;
+  /** 标记无解的区段数 */
+  rhythmImpossible: number;
   preview: string;
   canExport: boolean;
   onExport(): void;
@@ -59,6 +65,29 @@ export function ExportPanel(props: ExportPanelProps) {
           <span className="check-ic">{props.wrapFailed === 0 ? '✓' : '!'}</span>
           智能断行：已应用 {props.wrapApplied} 条
           {props.wrapFailed > 0 && <em>（{props.wrapFailed} 条无法满足限制，保持原文）</em>}
+        </li>
+        <li
+          className={
+            props.rhythmSegments === 0
+              ? 'pass'
+              : props.rhythmImpossible > 0
+                ? 'warn'
+                : props.rhythmApplied > 0
+                  ? 'pass'
+                  : 'warn'
+          }
+        >
+          <span className="check-ic">
+            {props.rhythmSegments === 0 ||
+            (props.rhythmImpossible === 0 && props.rhythmApplied > 0)
+              ? '✓'
+              : '!'}
+          </span>
+          阅读节奏：已采纳 {props.rhythmApplied}/{props.rhythmSegments} 段
+          {props.rhythmImpossible > 0 && <em>（{props.rhythmImpossible} 个区段无解，保持原时间）</em>}
+          {props.rhythmSegments > 0 && props.rhythmApplied === 0 && props.rhythmImpossible === 0 && (
+            <em>（尚未采纳，预览为原时间）</em>
+          )}
         </li>
       </ul>
 
