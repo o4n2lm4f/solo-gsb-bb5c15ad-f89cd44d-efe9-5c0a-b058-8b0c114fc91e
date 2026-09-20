@@ -16,6 +16,12 @@ import {
   type Resolution,
   type TimeChoice,
 } from './lib/merge';
+import {
+  analyzePace,
+  applyPaceFixes,
+  DEFAULT_PACE_OPTIONS,
+  type PaceOptions,
+} from './lib/pace';
 import { SAMPLE_A, SAMPLE_B } from './lib/samples';
 import { parseSrt, serializeSrt, type Cue } from './lib/srt';
 import { applyScrollChains, findScrollChains, type ScrollOptions } from './lib/scroll';
@@ -25,6 +31,7 @@ import { DedupePanel } from './components/DedupePanel';
 import { ExportPanel } from './components/ExportPanel';
 import { GroupCard } from './components/GroupCard';
 import { ImportPanel } from './components/ImportPanel';
+import { PacePanel } from './components/PacePanel';
 import { StatsBar } from './components/StatsBar';
 import { Toolbar, type Filter } from './components/Toolbar';
 import { WrapPanel } from './components/WrapPanel';
@@ -84,7 +91,7 @@ export default function App() {
   const cuesBEff: Cue[] = groups ? (cuesBUsed ?? cuesB) : cuesB;
 
   // 智能断行：视图切换、参数与逐条应用状态（key 为 groupIndex）
-  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap'>('groups');
+  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'pace'>('groups');
   const [wrapOpts, setWrapOpts] = useState<WrapOptions>({
     maxWidth: 42,
     maxLines: 2,
@@ -98,6 +105,10 @@ export default function App() {
     minOverlap: 2,
   });
   const [scrollAccepted, setScrollAccepted] = useState<ReadonlySet<string>>(new Set());
+
+  // 阅读节奏：参数（最大字符/秒、最短/最长时长）与逐区段采纳状态（key 为区段 key）
+  const [paceOpts, setPaceOpts] = useState<PaceOptions>(DEFAULT_PACE_OPTIONS);
+  const [paceAccepted, setPaceAccepted] = useState<ReadonlySet<string>>(new Set());
 
   /** 用指定的 B 时间轴执行顺序对齐，并进入工作区。 */
   const runAlign = (b: Cue[]) => {
@@ -114,6 +125,7 @@ export default function App() {
       setView('groups');
       setWrapApplied(new Set());
       setScrollAccepted(new Set());
+      setPaceAccepted(new Set());
       setPhase('workspace');
     }, 30);
   };
@@ -213,6 +225,7 @@ export default function App() {
     setView('groups');
     setWrapApplied(new Set());
     setScrollAccepted(new Set());
+    setPaceAccepted(new Set());
     setPhase('import');
   };
 
@@ -225,6 +238,7 @@ export default function App() {
     setView('groups');
     setWrapApplied(new Set());
     setScrollAccepted(new Set());
+    setPaceAccepted(new Set());
     setPhase('calibrate');
   };
 
@@ -373,9 +387,45 @@ export default function App() {
   };
   const restoreAllWrap = () => setWrapApplied(new Set());
 
+  // 阅读节奏：在已采纳消重、已应用断行的当前结果上统计字/秒并划分超限区段；
+  // 已采纳区段只替换时间，文本、顺序与 groupIndex 不变，随后进入预览与导出
+  const paceAnalysis = useMemo(
+    () => analyzePace(wrappedCues, paceOpts),
+    [wrappedCues, paceOpts],
+  );
+  const pacedCues = useMemo(
+    () => applyPaceFixes(wrappedCues, paceAnalysis.segments, paceAccepted),
+    [wrappedCues, paceAnalysis, paceAccepted],
+  );
+  const paceStats = useMemo(() => {
+    let applied = 0;
+    let unsolvable = 0;
+    for (const seg of paceAnalysis.segments) {
+      if (!seg.ok) unsolvable++;
+      else if (paceAccepted.has(seg.key)) applied++;
+    }
+    const violating = paceAnalysis.stats.reduce((n, s) => n + (s.violating ? 1 : 0), 0);
+    return { segments: paceAnalysis.segments.length, applied, unsolvable, violating };
+  }, [paceAnalysis, paceAccepted]);
+
+  const acceptPace = (key: string) => setPaceAccepted((prev) => new Set(prev).add(key));
+  const restorePace = (key: string) =>
+    setPaceAccepted((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  const acceptAllPace = (keys: string[]) =>
+    setPaceAccepted((prev) => {
+      const next = new Set(prev);
+      keys.forEach((k) => next.add(k));
+      return next;
+    });
+  const restoreAllPace = () => setPaceAccepted(new Set());
+
   const finalCues = useMemo(
-    () => (autoFix ? autoFixTimes(wrappedCues) : wrappedCues),
-    [wrappedCues, autoFix],
+    () => (autoFix ? autoFixTimes(pacedCues) : pacedCues),
+    [pacedCues, autoFix],
   );
   const issues = useMemo(
     () =>
@@ -541,6 +591,13 @@ export default function App() {
                     智能断行
                     <span className="tab-count">{wrapStats.appliedCount}</span>
                   </button>
+                  <button
+                    className={`tab ${view === 'pace' ? 'active' : ''}`}
+                    onClick={() => setView('pace')}
+                  >
+                    阅读节奏
+                    <span className="tab-count">{paceStats.violating}</span>
+                  </button>
                 </div>
                 {view === 'groups' ? (
                   <>
@@ -590,7 +647,7 @@ export default function App() {
                     onAcceptAll={acceptAllChains}
                     onRestoreAll={restoreAllChains}
                   />
-                ) : (
+                ) : view === 'wrap' ? (
                   <WrapPanel
                     cues={dedupedCues}
                     results={wrapResults}
@@ -601,6 +658,18 @@ export default function App() {
                     onRestore={restoreWrap}
                     onApplyAll={applyAllWrap}
                     onRestoreAll={restoreAllWrap}
+                  />
+                ) : (
+                  <PacePanel
+                    cues={wrappedCues}
+                    analysis={paceAnalysis}
+                    accepted={paceAccepted}
+                    options={paceOpts}
+                    onOptions={setPaceOpts}
+                    onAccept={acceptPace}
+                    onRestore={restorePace}
+                    onAcceptAll={acceptAllPace}
+                    onRestoreAll={restoreAllPace}
                   />
                 )}
               </main>
@@ -618,6 +687,9 @@ export default function App() {
                 dedupSaved={dedupStats.saved}
                 wrapApplied={wrapStats.appliedCount}
                 wrapFailed={wrapStats.failed}
+                paceSegments={paceStats.segments}
+                paceApplied={paceStats.applied}
+                paceUnsolvable={paceStats.unsolvable}
                 preview={preview}
                 canExport={canExport}
                 onExport={() => download('merged.srt', '\uFEFF' + serializeSrt(finalCues))}
